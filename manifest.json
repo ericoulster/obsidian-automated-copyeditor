@@ -1,0 +1,9 @@
+{
+  "id": "copyedit-ai-review",
+  "name": "Copyedit AI - Review Edition (WIP)",
+  "version": "0.0.1",
+  "minAppVersion": "1.4.0",
+  "description": "Side-panel review UX for local LLM line/copy editing suggestions. Each suggestion is a card with Accept/Reject; Accept surgically applies the edit to the source. Requires the copyedit-ai serve shim running on localhost. Working name; rename TBD.",
+  "author": "Eric Oulster",
+  "isDesktopOnly": true
+}
