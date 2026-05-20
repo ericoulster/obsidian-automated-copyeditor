@@ -1,4 +1,4 @@
-# copyedit-ai-obsidian
+# copyedit-automated-obsidian
 
 Obsidian plugin that runs a paragraph of your writing past a local
 language model and shows you the suggested edits as cards you can
