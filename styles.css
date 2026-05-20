@@ -89,6 +89,22 @@
   word-break: break-word;
 }
 
+.copyedit-ai-note {
+  display: flex;
+}
+.copyedit-ai-note input {
+  width: 100%;
+  font-size: 0.85em;
+  padding: 4px 6px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px;
+  color: var(--text-normal);
+}
+.copyedit-ai-note input::placeholder {
+  color: var(--text-faint);
+}
+
 .copyedit-ai-rationale {
   font-size: 0.85em;
   color: var(--text-normal);
@@ -103,4 +119,26 @@
 .copyedit-ai-buttons button {
   font-size: 0.85em;
   padding: 4px 10px;
+}
+
+.copyedit-ai-settings-rules,
+.copyedit-ai-modal-textarea {
+  width: 100%;
+  min-height: 6em;
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
+  padding: 8px;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  color: var(--text-normal);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.copyedit-ai-modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 12px;
 }

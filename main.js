@@ -16,7 +16,23 @@ const DEFAULT_ENDPOINT = 'http://127.0.0.1:8765/edit';
 const DEFAULT_SETTINGS = {
   endpoint: DEFAULT_ENDPOINT,
   timeoutMs: 90000,
+  enableMechanics: true,
+  enableClarity: true,
+  enableStyle: true,
+  enableTone: true,
+  userRules: '',
 };
+const FEEDBACK_FILE = 'feedback.jsonl';
+// Synthesis endpoint is the same host as the /edit endpoint, swapped path.
+function synthesizeUrlFor(editUrl) {
+  try {
+    const u = new URL(editUrl);
+    u.pathname = u.pathname.replace(/\/edit\/?$/, '/synthesize-rules');
+    return u.toString();
+  } catch (_) {
+    return editUrl.replace(/\/edit\/?$/, '/synthesize-rules');
+  }
+}
 
 
 // --- helpers -----------------------------------------------------------------
@@ -47,6 +63,43 @@ function fuzzyFind(haystack, needle) {
   return null;
 }
 
+// Loose locator for the Reveal action. Tries the strict matcher first;
+// if that fails, progressively trims the needle from the end, then the
+// start, then both, looking for a hit. Trim is capped at ~30% of the
+// needle length so we don't degenerate into matching any short
+// substring. Returns {start, end, approximate} or null.
+//
+// Reveal-only: Accept should NEVER use this. Partial-match accept would
+// replace text outside what the suggestion was actually about.
+function fuzzyFindLoose(haystack, needle) {
+  needle = (needle || '').trim();
+  if (!needle) return null;
+  const exact = fuzzyFind(haystack, needle);
+  if (exact) return { ...exact, approximate: false };
+
+  const maxTrim = Math.min(40, Math.floor(needle.length * 0.3));
+  const minLen = Math.max(20, needle.length - maxTrim);
+  for (let trim = 1; trim <= maxTrim; trim++) {
+    // End-trim: most common - LLM captured trailing punctuation or a
+    // tail word that the user edited away.
+    if (needle.length - trim >= minLen) {
+      const hit = fuzzyFind(haystack, needle.slice(0, -trim));
+      if (hit) return { ...hit, approximate: true };
+    }
+    // Start-trim: less common but symmetric.
+    if (needle.length - trim >= minLen) {
+      const hit = fuzzyFind(haystack, needle.slice(trim));
+      if (hit) return { ...hit, approximate: true };
+    }
+    // Both-ends trim, paying double.
+    if (needle.length - trim * 2 >= minLen) {
+      const hit = fuzzyFind(haystack, needle.slice(trim, needle.length - trim));
+      if (hit) return { ...hit, approximate: true };
+    }
+  }
+  return null;
+}
+
 
 // --- side panel view ---------------------------------------------------------
 
@@ -72,19 +125,23 @@ class ReviewPaneView extends obsidian.ItemView {
     const header = root.createDiv({ cls: 'copyedit-ai-header' });
     header.createEl('h3', { text: 'Copyedit AI - Review' });
 
-    const sugs = this.plugin.suggestions;
+    const allSugs = this.plugin.suggestions;
+    const sugs = allSugs.filter((s) => this.plugin.isCategoryEnabled(s.category));
+    const hidden = allSugs.length - sugs.length;
     const counts = header.createDiv({ cls: 'copyedit-ai-counts' });
     counts.setText(
-      sugs.length === 0
+      allSugs.length === 0
         ? 'No pending suggestions. Run "Suggest edits on selection" from the command palette.'
+        : hidden > 0
+        ? `${sugs.length} visible, ${hidden} hidden by category filter (Settings -> Copyedit AI)`
         : `${sugs.length} pending suggestion${sugs.length === 1 ? '' : 's'}`
     );
 
     if (sugs.length > 0) {
       const actions = header.createDiv({ cls: 'copyedit-ai-bulk' });
-      const acceptAll = actions.createEl('button', { text: 'Accept all' });
+      const acceptAll = actions.createEl('button', { text: 'Accept all visible' });
       acceptAll.addEventListener('click', () => this.plugin.acceptAll());
-      const rejectAll = actions.createEl('button', { text: 'Reject all' });
+      const rejectAll = actions.createEl('button', { text: 'Reject all visible' });
       rejectAll.addEventListener('click', () => this.plugin.rejectAll());
     }
 
@@ -116,6 +173,14 @@ class ReviewPaneView extends obsidian.ItemView {
     if (sug.rationale) {
       card.createDiv({ cls: 'copyedit-ai-rationale', text: sug.rationale });
     }
+
+    const noteRow = card.createDiv({ cls: 'copyedit-ai-note' });
+    const noteInput = noteRow.createEl('input', {
+      type: 'text',
+      placeholder: 'Why? (optional - logged for future training)',
+    });
+    noteInput.value = sug.userNote || '';
+    noteInput.addEventListener('input', () => { sug.userNote = noteInput.value; });
 
     const buttons = card.createDiv({ cls: 'copyedit-ai-buttons' });
     const acceptBtn = buttons.createEl('button',
@@ -166,6 +231,11 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       id: 'clear-pending',
       name: 'Clear all pending suggestions',
       callback: () => this.rejectAll(),
+    });
+    this.addCommand({
+      id: 'synthesize-rules',
+      name: 'Synthesize rules from feedback log',
+      callback: () => this.synthesizeRulesFromFeedback(),
     });
 
     // Right-click context menu in the editor.
@@ -361,7 +431,7 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       const r = await fetch(this.settings.endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passage }),
+        body: JSON.stringify({ passage, user_rules: this.settings.userRules || '' }),
         signal: controller.signal,
       });
       if (!r.ok) {
@@ -376,22 +446,68 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
 
   // --- accept / reject ------------------------------------------------------
 
-  async acceptSuggestion(id) {
+  isCategoryEnabled(category) {
+    const n = (category || '').toLowerCase();
+    if (n.startsWith('mech')) return this.settings.enableMechanics;
+    if (n.startsWith('clar')) return this.settings.enableClarity;
+    if (n.startsWith('style') || n.startsWith('tone')) {
+      return n.startsWith('style')
+        ? this.settings.enableStyle
+        : this.settings.enableTone;
+    }
+    // Unknown category (model emitted something off-rubric): show it.
+    return true;
+  }
+
+  /**
+   * Append one record to the per-vault feedback log
+   * (.obsidian/plugins/<id>/feedback.jsonl). Each record carries the
+   * decision, the suggestion, and the optional user note. The log is
+   * append-only JSONL so it stays portable as training data.
+   */
+  async logFeedback(sug, action, opts) {
+    opts = opts || {};
+    const record = {
+      timestamp: new Date().toISOString(),
+      action,            // "accept" | "reject"
+      bulk: !!opts.bulk, // set true for accept-all / reject-all sweeps
+      source_file: sug.sourceFile || '',
+      category: sug.category || '',
+      original_text: sug.original_text || '',
+      proposed_replacement: sug.proposed_replacement || '',
+      rationale: sug.rationale || '',
+      user_note: (sug.userNote || '').trim(),
+    };
+    const path = `${this.app.vault.configDir}/plugins/${this.manifest.id}/${FEEDBACK_FILE}`;
+    try {
+      await this.app.vault.adapter.append(path, JSON.stringify(record) + '\n');
+    } catch (err) {
+      console.error('copyedit-ai feedback log write failed', err);
+    }
+  }
+
+  async acceptSuggestion(id, opts) {
     const idx = this.suggestions.findIndex((s) => s.id === id);
     if (idx === -1) return;
     const sug = this.suggestions[idx];
     const applied = await this.applyToFile(sug);
     if (!applied.ok) {
-      new obsidian.Notice(`Copyedit AI: could not apply (${applied.reason})`);
+      const hint = applied.reason === 'span not found'
+        ? ' - the text near the span may have changed; reject and re-run on that paragraph for a fresh suggestion'
+        : '';
+      new obsidian.Notice(`Copyedit AI: could not apply (${applied.reason})${hint}`);
       return;
     }
+    await this.logFeedback(sug, 'accept', opts);
     this.suggestions.splice(idx, 1);
     this.refreshPane();
   }
 
-  rejectSuggestion(id) {
+  async rejectSuggestion(id, opts) {
     const idx = this.suggestions.findIndex((s) => s.id === id);
     if (idx === -1) return;
+    const sug = this.suggestions[idx];
+    await this.logFeedback(sug, 'reject', opts);
     this.suggestions.splice(idx, 1);
     this.refreshPane();
   }
@@ -411,7 +527,7 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
     const editor = leaf.view && leaf.view.editor;
     if (!editor) return;
     const text = editor.getValue();
-    const hit = fuzzyFind(text, sug.original_text.trim());
+    const hit = fuzzyFindLoose(text, sug.original_text);
     if (!hit) {
       new obsidian.Notice('Copyedit AI: span not found in current file.');
       return;
@@ -420,15 +536,24 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
     const to = editor.offsetToPos(hit.end);
     editor.setSelection(from, to);
     editor.scrollIntoView({ from, to }, true);
+    if (hit.approximate) {
+      new obsidian.Notice(
+        'Copyedit AI: approximate location - text near the span has changed.'
+      );
+    }
   }
 
   async acceptAll() {
-    const ids = this.suggestions.map((s) => s.id);
-    for (const id of ids) await this.acceptSuggestion(id);
+    const ids = this.suggestions
+      .filter((s) => this.isCategoryEnabled(s.category))
+      .map((s) => s.id);
+    for (const id of ids) await this.acceptSuggestion(id, { bulk: true });
   }
 
-  rejectAll() {
-    this.suggestions = [];
+  async rejectAll() {
+    const visible = this.suggestions.filter((s) => this.isCategoryEnabled(s.category));
+    for (const sug of visible) await this.logFeedback(sug, 'reject', { bulk: true });
+    this.suggestions = this.suggestions.filter((s) => !this.isCategoryEnabled(s.category));
     this.refreshPane();
   }
 
@@ -484,6 +609,140 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
     }
     return null;
   }
+
+  // --- rules synthesis ------------------------------------------------------
+
+  feedbackPath() {
+    return `${this.app.vault.configDir}/plugins/${this.manifest.id}/${FEEDBACK_FILE}`;
+  }
+
+  /**
+   * Read the feedback JSONL log and return the recent reject records (with
+   * a few accepts mixed in for contrast). Capped so a runaway log doesn't
+   * bust Gemma's context. Returns parsed records, oldest first.
+   */
+  async readRecentFeedback(maxRejects, maxAccepts) {
+    maxRejects = maxRejects || 80;
+    maxAccepts = maxAccepts || 10;
+    const path = this.feedbackPath();
+    if (!(await this.app.vault.adapter.exists(path))) return [];
+    const raw = await this.app.vault.adapter.read(path);
+    const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+    const all = [];
+    for (const line of lines) {
+      try { all.push(JSON.parse(line)); } catch (_) {}
+    }
+    const rejects = all.filter((r) => r.action === 'reject').slice(-maxRejects);
+    const accepts = all.filter((r) => r.action === 'accept').slice(-maxAccepts);
+    return [...rejects, ...accepts];
+  }
+
+  async synthesizeRulesFromFeedback() {
+    let records;
+    try {
+      records = await this.readRecentFeedback();
+    } catch (err) {
+      new obsidian.Notice('Copyedit AI: could not read feedback log: ' + err.message);
+      return;
+    }
+    if (records.length < 5) {
+      new obsidian.Notice(
+        `Copyedit AI: only ${records.length} feedback record(s) - need at least 5 for synthesis to be useful.`
+      );
+      return;
+    }
+    this.statusBar.setText('Copyedit AI: synthesizing rules...');
+    const t0 = Date.now();
+    let payload;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.settings.timeoutMs);
+      try {
+        const r = await fetch(synthesizeUrlFor(this.settings.endpoint), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feedback: records }),
+          signal: controller.signal,
+        });
+        if (!r.ok) {
+          const detail = await r.text().catch(() => '');
+          throw new Error(`HTTP ${r.status}${detail ? ': ' + detail : ''}`);
+        }
+        payload = await r.json();
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch (err) {
+      this.statusBar.setText('');
+      new obsidian.Notice('Copyedit AI synthesis failed: ' + err.message);
+      console.error('copyedit-ai synth failed', err);
+      return;
+    }
+    this.statusBar.setText('');
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    new SynthesizedRulesModal(this.app, this, payload.rules || '', records.length, elapsed).open();
+  }
+}
+
+
+class SynthesizedRulesModal extends obsidian.Modal {
+  constructor(app, plugin, proposed, recordCount, elapsedSecs) {
+    super(app);
+    this.plugin = plugin;
+    this.proposed = proposed;
+    this.recordCount = recordCount;
+    this.elapsedSecs = elapsedSecs;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl('h2', { text: 'Synthesized rules' });
+    contentEl.createEl('p', {
+      text: `Drafted from ${this.recordCount} recent feedback record(s) in `
+          + `${this.elapsedSecs}s. Review and edit before applying.`,
+      cls: 'setting-item-description',
+    });
+
+    const textarea = contentEl.createEl('textarea', { cls: 'copyedit-ai-modal-textarea' });
+    textarea.value = this.proposed;
+    textarea.rows = 14;
+    this.textarea = textarea;
+
+    const existing = (this.plugin.settings.userRules || '').trim();
+    const btnRow = contentEl.createDiv({ cls: 'copyedit-ai-modal-buttons' });
+
+    const replaceBtn = btnRow.createEl('button', { text: 'Replace existing rules', cls: 'mod-cta' });
+    replaceBtn.addEventListener('click', () => this.commit(textarea.value, 'replace'));
+
+    const appendBtn = btnRow.createEl('button', { text: 'Append to existing rules' });
+    appendBtn.disabled = existing.length === 0;
+    appendBtn.addEventListener('click', () => this.commit(textarea.value, 'append'));
+
+    const copyBtn = btnRow.createEl('button', { text: 'Copy to clipboard' });
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(textarea.value);
+        new obsidian.Notice('Copyedit AI: rules copied.');
+      } catch (_) {}
+    });
+
+    const cancelBtn = btnRow.createEl('button', { text: 'Cancel' });
+    cancelBtn.addEventListener('click', () => this.close());
+  }
+  async commit(text, mode) {
+    const cleaned = (text || '').trim();
+    const existing = (this.plugin.settings.userRules || '').trim();
+    let next = cleaned;
+    if (mode === 'append' && existing) {
+      next = existing + '\n' + cleaned;
+    }
+    this.plugin.settings.userRules = next;
+    await this.plugin.saveSettings();
+    new obsidian.Notice(`Copyedit AI: rules ${mode === 'append' ? 'appended' : 'saved'}.`);
+    this.close();
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
 }
 
 
@@ -518,6 +777,69 @@ class ReviewSettingTab extends obsidian.PluginSettingTab {
             ? n : DEFAULT_SETTINGS.timeoutMs;
           await this.plugin.saveSettings();
         }));
+
+    containerEl.createEl('h3', { text: 'Categories to show' });
+    containerEl.createEl('p', {
+      text: 'Suggestions tagged with an unchecked category are hidden '
+          + 'from the panel. The shim still generates them; only the '
+          + 'display is filtered.',
+      cls: 'setting-item-description',
+    });
+    const catRow = (key, label) => {
+      new obsidian.Setting(containerEl).setName(label).addToggle((tg) => tg
+        .setValue(this.plugin.settings[key])
+        .onChange(async (v) => {
+          this.plugin.settings[key] = v;
+          await this.plugin.saveSettings();
+          this.plugin.refreshPane();
+        }));
+    };
+    catRow('enableMechanics', 'Mechanics');
+    catRow('enableClarity', 'Clarity');
+    catRow('enableStyle', 'Style');
+    catRow('enableTone', 'Tone');
+
+    containerEl.createEl('h3', { text: 'User rules' });
+    containerEl.createEl('p', {
+      text: 'Free-form DROP rules that get appended to the critic prompt '
+          + 'on every request. One rule per line is typical. Takes effect '
+          + 'immediately; no shim restart needed. Use the "Synthesize '
+          + 'rules from feedback log" command to draft these from your '
+          + 'Accept / Reject history.',
+      cls: 'setting-item-description',
+    });
+    const rulesArea = containerEl.createEl('textarea', {
+      cls: 'copyedit-ai-settings-rules',
+    });
+    rulesArea.value = this.plugin.settings.userRules || '';
+    rulesArea.rows = 8;
+    rulesArea.placeholder
+      = 'DROP if the edit strips an intensifier (very, really, just) from prose.\n'
+      + 'DROP if the edit modernizes period diction (to-morrow, I dare say, ...).';
+    rulesArea.addEventListener('change', async () => {
+      this.plugin.settings.userRules = rulesArea.value;
+      await this.plugin.saveSettings();
+    });
+
+    new obsidian.Setting(containerEl)
+      .setName('Synthesize from feedback')
+      .setDesc('Read the feedback log and ask the local model to draft '
+             + 'rules based on what you tend to reject. Opens a review '
+             + 'modal; nothing is saved until you confirm.')
+      .addButton((b) => b
+        .setButtonText('Synthesize now')
+        .onClick(() => this.plugin.synthesizeRulesFromFeedback()));
+
+    containerEl.createEl('h3', { text: 'Feedback log' });
+    const logPath = `${this.app.vault.configDir}/plugins/${this.plugin.manifest.id}/${FEEDBACK_FILE}`;
+    containerEl.createEl('p', {
+      text: 'Every Accept / Reject is appended to this file as one JSON '
+          + 'line, with your optional note. Portable training data for a '
+          + 'personalized filter later.',
+      cls: 'setting-item-description',
+    });
+    const pathEl = containerEl.createEl('p', { cls: 'setting-item-description' });
+    pathEl.createEl('code', { text: logPath });
   }
 }
 
