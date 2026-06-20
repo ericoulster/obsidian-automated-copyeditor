@@ -94,7 +94,7 @@ on) to pick up the change. `README.md`, `CLAUDE.md`, `LICENSE`, and
 `versions.json` do NOT need to be in the vault deploy.
 
 ```bash
-SRC=/home/hq/Documents/DevWork/copyedit-ai-obsidian
+SRC=/home/hq/Documents/DevWork/copyedit-ai-obsidian/obsidian-ai-copyeditor
 DEST="/home/hq/Documents/Writing/Scum & Villainy/Scum & Villainy Notes/.obsidian/plugins/copyedit-ai-review/"
 cp "$SRC/manifest.json" "$SRC/main.js" "$SRC/styles.css" "$DEST"
 ```
@@ -107,8 +107,25 @@ manifest.json `name` and the command-palette prefixes in main.js.
 
 ## Companion shim
 
-The shim must be running for the plugin to do anything useful.
-Restart from the parent repo with:
+The shim must be running for the plugin to do anything useful. The
+plugin can start and stop it for you:
+
+- Start server / Stop server button in the review pane header, or the
+  "Start / Stop local server" commands.
+- The plugin spawns `python -u -m copyedit.serve.server` (paths in the
+  "Local server" settings section) as a child of Obsidian via Node's
+  `child_process`, polls `/health`, and reports when ready. It refuses
+  to double-bind if a server is already answering on the endpoint.
+- Lifecycle is tied to the plugin: Stop, disabling the plugin, or
+  quitting Obsidian sends SIGTERM (`onunload`), so the shim is never
+  left running in the background. A crash that skips `onunload` can
+  leak it; the next Start detects the live port and declines to start
+  a second.
+- Settings keys: `serverPython`, `serverCwd`, `serverModule`. Defaults
+  are machine-specific (the maintainer's checkout) - sanitize before
+  publishing to the community gallery.
+
+Manual fallback - start it yourself from the parent repo:
 ```bash
 cd ../copyedit-ai
 .venv/bin/python -u -m copyedit.serve.server > /tmp/copyedit_shim.log 2>&1 &

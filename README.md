@@ -30,6 +30,20 @@ cp manifest.json main.js styles.css YOUR_VAULT/.obsidian/plugins/copyedit-ai-rev
 In Obsidian: Settings, Community plugins, toggle "Copyedit AI - Review
 Edition (WIP)" on. Disable Restricted Mode first if it's on.
 
+## Starting the server
+
+The plugin needs the local server running. You can start it without
+leaving Obsidian: open the review pane and click "Start server" (or run
+the "Start local server" command). It launches the companion
+`copyedit-ai` shim, waits for it to load the model (~10 s), and tells
+you when it's ready. "Stop server" shuts it down, and so does disabling
+the plugin or quitting Obsidian, so it only runs while you're editing.
+
+Set the Python path, working directory, and module under Settings,
+"Local server" first - they default to the maintainer's checkout and
+will differ on your machine. If you'd rather run the server yourself,
+start it from the parent `copyedit-ai` repo and skip this.
+
 ## Use
 
 Open the side panel from the pencil ribbon icon on the left, or run

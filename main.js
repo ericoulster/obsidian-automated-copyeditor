@@ -10,9 +10,19 @@
 'use strict';
 
 const obsidian = require('obsidian');
+// Desktop-only plugin (manifest isDesktopOnly), so Node's child_process is
+// available in the renderer. Used solely to launch/stop the local serve
+// shim from a button; the plugin never spawns anything on mobile.
+const { spawn } = require('child_process');
 
 const VIEW_TYPE = 'copyedit-ai-review-pane';
 const DEFAULT_ENDPOINT = 'http://127.0.0.1:8765/edit';
+// Machine-specific defaults for the in-app Start server button. These point
+// at the maintainer's local copyedit-ai checkout; override in Settings on a
+// different machine (or before publishing).
+const DEFAULT_SERVER_PYTHON = '/home/hq/Documents/DevWork/copyedit-ai/.venv/bin/python';
+const DEFAULT_SERVER_CWD = '/home/hq/Documents/DevWork/copyedit-ai';
+const DEFAULT_SERVER_MODULE = 'copyedit.serve.server';
 const DEFAULT_SETTINGS = {
   endpoint: DEFAULT_ENDPOINT,
   timeoutMs: 90000,
@@ -21,6 +31,9 @@ const DEFAULT_SETTINGS = {
   enableStyle: true,
   enableTone: true,
   userRules: '',
+  serverPython: DEFAULT_SERVER_PYTHON,
+  serverCwd: DEFAULT_SERVER_CWD,
+  serverModule: DEFAULT_SERVER_MODULE,
 };
 const FEEDBACK_FILE = 'feedback.jsonl';
 // Synthesis endpoint is the same host as the /edit endpoint, swapped path.
@@ -32,6 +45,31 @@ function synthesizeUrlFor(editUrl) {
   } catch (_) {
     return editUrl.replace(/\/edit\/?$/, '/synthesize-rules');
   }
+}
+
+// Health endpoint is the same host as the /edit endpoint, swapped path.
+function healthUrlFor(editUrl) {
+  try {
+    const u = new URL(editUrl);
+    u.pathname = u.pathname.replace(/\/edit\/?$/, '/health');
+    return u.toString();
+  } catch (_) {
+    return editUrl.replace(/\/edit\/?$/, '/health');
+  }
+}
+
+// Heuristic: does this fetch error look like "nothing is listening" rather
+// than a server-side error? Chromium surfaces a refused connection as a
+// TypeError ("Failed to fetch"); Node-side errors carry ECONNREFUSED.
+function looksLikeServerDown(err) {
+  if (!err) return false;
+  if (err.name === 'TypeError') return true;
+  const m = (err.message || '').toLowerCase();
+  return m.includes('failed to fetch')
+      || m.includes('econnrefused')
+      || m.includes('connection refused')
+      || m.includes('err_connection_refused')
+      || m.includes('networkerror');
 }
 
 
@@ -125,6 +163,27 @@ class ReviewPaneView extends obsidian.ItemView {
     const header = root.createDiv({ cls: 'copyedit-ai-header' });
     header.createEl('h3', { text: 'Copyedit AI - Review' });
 
+    // Local-server control. Lets you start/stop the shim without leaving
+    // Obsidian; the server only runs while the plugin manages it.
+    const serverRow = header.createDiv({ cls: 'copyedit-ai-server' });
+    const starting = this.plugin.serverStarting;
+    const managed = !!this.plugin.serverProcess;
+    const dot = serverRow.createSpan({ cls: 'copyedit-ai-server-dot' });
+    dot.toggleClass('is-on', managed && !starting);
+    dot.toggleClass('is-starting', starting);
+    const statusSpan = serverRow.createSpan({ cls: 'copyedit-ai-server-status' });
+    statusSpan.setText(
+      starting ? 'Server: starting...'
+      : managed ? 'Server: running'
+      : 'Server: not started by plugin'
+    );
+    const serverBtn = serverRow.createEl('button', {
+      text: starting ? 'Starting...' : managed ? 'Stop server' : 'Start server',
+    });
+    serverBtn.disabled = starting;
+    serverBtn.addEventListener('click', () =>
+      managed ? this.plugin.stopServer() : this.plugin.startServer());
+
     const allSugs = this.plugin.suggestions;
     const sugs = allSugs.filter((s) => this.plugin.isCategoryEnabled(s.category));
     const hidden = allSugs.length - sugs.length;
@@ -203,6 +262,14 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
     /** @type {Array<{id,original_text,proposed_replacement,category,rationale,sourceFile}>} */
     this.suggestions = [];
 
+    // Local server lifecycle. serverProcess is the spawned child when the
+    // plugin manages the shim; null otherwise (not running, or running but
+    // started outside the plugin). _stoppingServer suppresses the
+    // "unexpected exit" notice during a deliberate stop/unload.
+    this.serverProcess = null;
+    this.serverStarting = false;
+    this._stoppingServer = false;
+
     this.registerView(VIEW_TYPE, (leaf) => new ReviewPaneView(leaf, this));
 
     this.addRibbonIcon('pencil-line', 'Copyedit AI: Open review pane', () => this.activatePane());
@@ -231,6 +298,16 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       id: 'clear-pending',
       name: 'Clear all pending suggestions',
       callback: () => this.rejectAll(),
+    });
+    this.addCommand({
+      id: 'start-server',
+      name: 'Start local server',
+      callback: () => this.startServer(),
+    });
+    this.addCommand({
+      id: 'stop-server',
+      name: 'Stop local server',
+      callback: () => this.stopServer(),
     });
     this.addCommand({
       id: 'synthesize-rules',
@@ -267,6 +344,16 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
 
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+    // Tie the managed server's lifetime to the plugin: disabling the
+    // plugin or quitting Obsidian shuts the shim down, so it is never
+    // left running in the background. (A crash that skips onunload can
+    // leak it; the next Start detects the live port and declines to
+    // double-bind.)
+    if (this.serverProcess) {
+      this._stoppingServer = true;
+      try { this.serverProcess.kill('SIGTERM'); } catch (_) {}
+      this.serverProcess = null;
+    }
   }
 
   async loadSettings() {
@@ -395,7 +482,10 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       payload = await this.callServer(text);
     } catch (err) {
       this.statusBar.setText('');
-      new obsidian.Notice('Copyedit AI error: ' + err.message);
+      const hint = (!this.serverProcess && looksLikeServerDown(err))
+        ? ' - is the local server running? Open the review pane and click "Start server".'
+        : '';
+      new obsidian.Notice('Copyedit AI error: ' + err.message + hint);
       console.error('copyedit-ai server call failed', err);
       return;
     }
@@ -442,6 +532,136 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // --- local server lifecycle -----------------------------------------------
+
+  /** Probe the /health endpoint (derived from the /edit endpoint). Returns
+   * true if something is listening and healthy, false on any error/timeout. */
+  async isServerUp(timeoutMs) {
+    timeoutMs = timeoutMs || 1500;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const r = await fetch(healthUrlFor(this.settings.endpoint), { signal: controller.signal });
+      return r.ok;
+    } catch (_) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Launch the local serve shim as a child of Obsidian. Refuses to start a
+   * second instance if one is already managed, already starting, or already
+   * answering on the endpoint (so we never collide on the port). The child
+   * is killed on Stop and on plugin unload, so it stays up only while you
+   * are editing.
+   */
+  async startServer() {
+    if (this.serverStarting) {
+      new obsidian.Notice('Copyedit AI: server is already starting...');
+      return;
+    }
+    if (this.serverProcess) {
+      new obsidian.Notice('Copyedit AI: server already running (managed by this plugin).');
+      return;
+    }
+    if (await this.isServerUp()) {
+      new obsidian.Notice('Copyedit AI: a server is already answering on the endpoint; not starting another.');
+      this.refreshPane();
+      return;
+    }
+    const py = (this.settings.serverPython || '').trim();
+    const cwd = (this.settings.serverCwd || '').trim();
+    const mod = (this.settings.serverModule || '').trim();
+    if (!py || !cwd || !mod) {
+      new obsidian.Notice('Copyedit AI: set the server Python, working dir, and module in Settings first.');
+      return;
+    }
+
+    this.serverStarting = true;
+    this.refreshPane();
+
+    let child;
+    try {
+      child = spawn(py, ['-u', '-m', mod], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) {
+      this.serverStarting = false;
+      this.refreshPane();
+      new obsidian.Notice('Copyedit AI: could not launch server: ' + err.message);
+      return;
+    }
+    this.serverProcess = child;
+
+    const log = (d) => console.log('[copyedit-ai server]', d.toString().trimEnd());
+    child.stdout.on('data', log);
+    child.stderr.on('data', log);
+    child.on('error', (err) => {
+      // Fires e.g. when the Python path is wrong (ENOENT).
+      console.error('copyedit-ai server process error', err);
+      new obsidian.Notice('Copyedit AI: server process error: ' + err.message);
+      if (this.serverProcess === child) this.serverProcess = null;
+      this.serverStarting = false;
+      this.refreshPane();
+    });
+    child.on('exit', (code, signal) => {
+      console.log(`copyedit-ai server exited (code=${code}, signal=${signal})`);
+      const deliberate = this._stoppingServer;
+      if (this.serverProcess === child) this.serverProcess = null;
+      this.serverStarting = false;
+      this._stoppingServer = false;
+      if (!deliberate) {
+        new obsidian.Notice(`Copyedit AI: server stopped unexpectedly (${code == null ? signal : 'code ' + code}).`);
+      }
+      this.refreshPane();
+    });
+
+    new obsidian.Notice('Copyedit AI: starting local server (model loads in ~10 s)...');
+    const ready = await this._waitForHealth(60000);
+    this.serverStarting = false;
+    this.refreshPane();
+    if (ready) {
+      new obsidian.Notice('Copyedit AI: server ready.');
+    } else if (this.serverProcess) {
+      new obsidian.Notice('Copyedit AI: server launched but not healthy yet - check the developer console.');
+    }
+  }
+
+  /** Poll /health until healthy, the process dies, or the deadline passes. */
+  async _waitForHealth(maxMs) {
+    const deadline = Date.now() + maxMs;
+    while (Date.now() < deadline) {
+      if (!this.serverProcess) return false; // died during startup
+      if (await this.isServerUp(2000)) return true;
+      await new Promise((res) => setTimeout(res, 1000));
+    }
+    return false;
+  }
+
+  /** Stop the plugin-managed server. SIGTERM, escalating to SIGKILL after a
+   * grace period. Does nothing to a server the plugin did not start. */
+  async stopServer() {
+    if (!this.serverProcess) {
+      new obsidian.Notice('Copyedit AI: no plugin-managed server to stop.');
+      return;
+    }
+    const child = this.serverProcess;
+    this._stoppingServer = true;
+    try {
+      child.kill('SIGTERM');
+    } catch (err) {
+      this._stoppingServer = false;
+      new obsidian.Notice('Copyedit AI: could not stop server: ' + err.message);
+      return;
+    }
+    new obsidian.Notice('Copyedit AI: stopping server...');
+    setTimeout(() => {
+      if (this.serverProcess === child) {
+        try { child.kill('SIGKILL'); } catch (_) {}
+      }
+    }, 5000);
   }
 
   // --- accept / reject ------------------------------------------------------
@@ -777,6 +997,56 @@ class ReviewSettingTab extends obsidian.PluginSettingTab {
             ? n : DEFAULT_SETTINGS.timeoutMs;
           await this.plugin.saveSettings();
         }));
+
+    containerEl.createEl('h3', { text: 'Local server' });
+    containerEl.createEl('p', {
+      text: 'Optional: let the plugin start and stop the copyedit-ai shim '
+          + 'for you (Start/Stop button in the review pane, or the "Start / '
+          + 'Stop local server" commands). The server runs only while the '
+          + 'plugin manages it - stopping the plugin or quitting Obsidian '
+          + 'shuts it down. These paths are machine-specific; leave them '
+          + 'alone if you start the server yourself.',
+      cls: 'setting-item-description',
+    });
+    new obsidian.Setting(containerEl)
+      .setName('Server Python')
+      .setDesc('Path to the Python interpreter (the copyedit-ai venv).')
+      .addText((t) => t
+        .setPlaceholder(DEFAULT_SERVER_PYTHON)
+        .setValue(this.plugin.settings.serverPython)
+        .onChange(async (v) => {
+          this.plugin.settings.serverPython = v;
+          await this.plugin.saveSettings();
+        }));
+    new obsidian.Setting(containerEl)
+      .setName('Server working directory')
+      .setDesc('The copyedit-ai repo root (where the copyedit package lives).')
+      .addText((t) => t
+        .setPlaceholder(DEFAULT_SERVER_CWD)
+        .setValue(this.plugin.settings.serverCwd)
+        .onChange(async (v) => {
+          this.plugin.settings.serverCwd = v;
+          await this.plugin.saveSettings();
+        }));
+    new obsidian.Setting(containerEl)
+      .setName('Server module')
+      .setDesc('Module run as `python -u -m <module>`.')
+      .addText((t) => t
+        .setPlaceholder(DEFAULT_SERVER_MODULE)
+        .setValue(this.plugin.settings.serverModule)
+        .onChange(async (v) => {
+          this.plugin.settings.serverModule = v;
+          await this.plugin.saveSettings();
+        }));
+    new obsidian.Setting(containerEl)
+      .setName('Server control')
+      .setDesc('Start or stop the local server now.')
+      .addButton((b) => b
+        .setButtonText('Start server')
+        .onClick(() => this.plugin.startServer()))
+      .addButton((b) => b
+        .setButtonText('Stop server')
+        .onClick(() => this.plugin.stopServer()));
 
     containerEl.createEl('h3', { text: 'Categories to show' });
     containerEl.createEl('p', {

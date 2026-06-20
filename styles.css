@@ -14,6 +14,35 @@
   margin-bottom: 8px;
 }
 
+.copyedit-ai-server {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85em;
+  margin: 4px 0 10px 0;
+}
+.copyedit-ai-server-status {
+  color: var(--text-muted);
+  flex: 1;
+}
+.copyedit-ai-server button {
+  font-size: 0.85em;
+  padding: 2px 8px;
+}
+.copyedit-ai-server-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: 0 0 auto;
+}
+.copyedit-ai-server-dot.is-on {
+  background: var(--color-green, #4caf50);
+}
+.copyedit-ai-server-dot.is-starting {
+  background: var(--color-yellow, #e0b000);
+}
+
 .copyedit-ai-bulk {
   display: flex;
   gap: 6px;
