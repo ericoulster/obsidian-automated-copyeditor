@@ -44,6 +44,17 @@ Set the Python path, working directory, and module under Settings,
 will differ on your machine. If you'd rather run the server yourself,
 start it from the parent `copyedit-ai` repo and skip this.
 
+If Obsidian is the Flatpak build, the plugin launches the server on
+the host through `flatpak-spawn --host`. That needs a one-time
+permission grant (then fully quit and reopen Obsidian):
+
+```bash
+flatpak override --user --talk-name=org.freedesktop.Flatpak md.obsidian.Obsidian
+```
+
+Without it, Start server fails with "server stopped unexpectedly" and
+the plugin shows a notice with the command above.
+
 ## Use
 
 Open the side panel from the pencil ribbon icon on the left, or run

@@ -584,9 +584,26 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
     this.serverStarting = true;
     this.refreshPane();
 
+    // Under the Flatpak build of Obsidian, spawn() runs inside the sandbox:
+    // the runtime's python3 shadows the host interpreter, so the venv's
+    // site-packages are invisible and the shim dies on import. flatpak-spawn
+    // --host escapes to the real system; it requires the org.freedesktop.Flatpak
+    // talk permission (flatpak override --user --talk-name=org.freedesktop.Flatpak
+    // md.obsidian.Obsidian). --watch-bus kills the host process if Obsidian
+    // dies without running onunload, so the shim still can't leak.
+    const inFlatpak = !!process.env.FLATPAK_ID;
     let child;
     try {
-      child = spawn(py, ['-u', '-m', mod], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+      if (inFlatpak) {
+        // sh -c wrapper instead of --directory: argv after the script string
+        // binds to $0/$1/$2, so paths pass through without shell-quoting risk.
+        child = spawn('flatpak-spawn', [
+          '--host', '--watch-bus',
+          '/bin/sh', '-c', 'cd "$0" && exec "$1" -u -m "$2"', cwd, py, mod,
+        ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      } else {
+        child = spawn(py, ['-u', '-m', mod], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+      }
     } catch (err) {
       this.serverStarting = false;
       this.refreshPane();
@@ -595,7 +612,19 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
     }
     this.serverProcess = child;
 
-    const log = (d) => console.log('[copyedit-ai server]', d.toString().trimEnd());
+    let portalHintShown = false;
+    const log = (d) => {
+      const s = d.toString();
+      if (inFlatpak && !portalHintShown && s.includes('Portal call failed')) {
+        portalHintShown = true;
+        new obsidian.Notice(
+          'Copyedit AI: Obsidian\'s Flatpak sandbox is not allowed to run host commands. ' +
+          'Run this once in a terminal, then fully quit and reopen Obsidian:\n' +
+          'flatpak override --user --talk-name=org.freedesktop.Flatpak md.obsidian.Obsidian',
+          20000);
+      }
+      console.log('[copyedit-ai server]', s.trimEnd());
+    };
     child.stdout.on('data', log);
     child.stderr.on('data', log);
     child.on('error', (err) => {

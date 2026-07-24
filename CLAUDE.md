@@ -124,6 +124,18 @@ plugin can start and stop it for you:
 - Settings keys: `serverPython`, `serverCwd`, `serverModule`. Defaults
   are machine-specific (the maintainer's checkout) - sanitize before
   publishing to the community gallery.
+- Flatpak Obsidian (the maintainer's install): a plain spawn() runs
+  inside the sandbox, where the runtime's python3 (3.12) shadows the
+  host interpreter and the venv's 3.10 site-packages are invisible -
+  the shim dies on import with exit 1 ("server stopped unexpectedly").
+  When `FLATPAK_ID` is set, the plugin instead spawns
+  `flatpak-spawn --host --watch-bus /bin/sh -c 'cd "$0" && exec "$1" -u -m "$2"' cwd py mod`.
+  Requires the org.freedesktop.Flatpak talk permission:
+  `flatpak override --user --talk-name=org.freedesktop.Flatpak md.obsidian.Obsidian`,
+  then a full Obsidian restart. `--watch-bus` kills the host process if
+  the sandbox dies without onunload, preserving the no-leak contract.
+  The plugin detects the "Portal call failed" stderr line and shows a
+  notice with the override command.
 
 Manual fallback - start it yourself from the parent repo:
 ```bash
