@@ -14,7 +14,10 @@ versioned independently of the model-training repo at
   in settings). The shim is at `../copyedit-ai/src/copyedit/serve/server.py`
   in the parent repo and is the source of truth for the editor/critic
   prompts.
-- Request: `POST /edit {"passage": str}`.
+- Request: `POST /edit {"passage": str, "user_rules": str, "keep_spelling": bool}`
+  (`keep_spelling` default true: the shim drops British/Canadian <-> American
+  spelling-variant suggestions; dash-style swaps are always dropped - both
+  deterministic rules from `copyedit.change_types`, added 2026-08-17/18).
 - Response: `{"suggestions": [{"original_text", "proposed_replacement",
   "category", "rationale"}], "timings": {...}}`.
 

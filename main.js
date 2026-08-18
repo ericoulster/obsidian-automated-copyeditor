@@ -31,6 +31,10 @@ const DEFAULT_SETTINGS = {
   enableStyle: true,
   enableTone: true,
   userRules: '',
+  // Keep the author's spelling convention (British/Canadian vs American):
+  // the shim drops suggestions whose only substantive change is a spelling
+  // variant. Default on.
+  keepSpelling: true,
   serverPython: DEFAULT_SERVER_PYTHON,
   serverCwd: DEFAULT_SERVER_CWD,
   serverModule: DEFAULT_SERVER_MODULE,
@@ -521,7 +525,11 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       const r = await fetch(this.settings.endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ passage, user_rules: this.settings.userRules || '' }),
+        body: JSON.stringify({
+          passage,
+          user_rules: this.settings.userRules || '',
+          keep_spelling: this.settings.keepSpelling !== false,
+        }),
         signal: controller.signal,
       });
       if (!r.ok) {
@@ -1097,6 +1105,21 @@ class ReviewSettingTab extends obsidian.PluginSettingTab {
     catRow('enableClarity', 'Clarity');
     catRow('enableStyle', 'Style');
     catRow('enableTone', 'Tone');
+
+    containerEl.createEl('h3', { text: 'Spelling' });
+    new obsidian.Setting(containerEl)
+      .setName('Keep my spelling convention')
+      .setDesc('Drop suggestions that only switch between British/Canadian '
+          + 'and American spelling (colour/color, realise/realize, '
+          + 'centre/center). Applied by the shim before the critic; takes '
+          + 'effect on the next request. Dash-style swaps (hyphen or -- for '
+          + 'an em dash, dash for a comma) are always dropped.')
+      .addToggle((tg) => tg
+        .setValue(this.plugin.settings.keepSpelling !== false)
+        .onChange(async (v) => {
+          this.plugin.settings.keepSpelling = v;
+          await this.plugin.saveSettings();
+        }));
 
     containerEl.createEl('h3', { text: 'User rules' });
     containerEl.createEl('p', {
