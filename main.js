@@ -4,15 +4,15 @@
 // source file; reject discards it. Suggestions persist across editor focus
 // changes until the user explicitly dismisses them.
 //
-// Vanilla JS, no build step. Companion to the local serve shim at
+// Vanilla JS, no build step. Companion to the copyedit-ai server at
 // src/copyedit/serve/server.py.
 
 'use strict';
 
 const obsidian = require('obsidian');
 // Desktop-only plugin (manifest isDesktopOnly), so Node's child_process is
-// available in the renderer. Used solely to launch/stop the local serve
-// shim from a button; the plugin never spawns anything on mobile.
+// available in the renderer. Used solely to launch/stop the local
+// copyedit-ai server from a button; the plugin never spawns anything on mobile.
 const { spawn } = require('child_process');
 
 const VIEW_TYPE = 'copyedit-ai-review-pane';
@@ -32,7 +32,7 @@ const DEFAULT_SETTINGS = {
   enableTone: true,
   userRules: '',
   // Keep the author's spelling convention (British/Canadian vs American):
-  // the shim drops suggestions whose only substantive change is a spelling
+  // the server drops suggestions whose only substantive change is a spelling
   // variant. Default on.
   keepSpelling: true,
   serverPython: DEFAULT_SERVER_PYTHON,
@@ -167,7 +167,7 @@ class ReviewPaneView extends obsidian.ItemView {
     const header = root.createDiv({ cls: 'copyedit-ai-header' });
     header.createEl('h3', { text: 'Copyedit AI - Review' });
 
-    // Local-server control. Lets you start/stop the shim without leaving
+    // Local-server control. Lets you start/stop the server without leaving
     // Obsidian; the server only runs while the plugin manages it.
     const serverRow = header.createDiv({ cls: 'copyedit-ai-server' });
     const starting = this.plugin.serverStarting;
@@ -267,7 +267,7 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
     this.suggestions = [];
 
     // Local server lifecycle. serverProcess is the spawned child when the
-    // plugin manages the shim; null otherwise (not running, or running but
+    // plugin manages the server; null otherwise (not running, or running but
     // started outside the plugin). _stoppingServer suppresses the
     // "unexpected exit" notice during a deliberate stop/unload.
     this.serverProcess = null;
@@ -349,7 +349,7 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
     // Tie the managed server's lifetime to the plugin: disabling the
-    // plugin or quitting Obsidian shuts the shim down, so it is never
+    // plugin or quitting Obsidian shuts the server down, so it is never
     // left running in the background. (A crash that skips onunload can
     // leak it; the next Start detects the live port and declines to
     // double-bind.)
@@ -414,10 +414,10 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
   }
 
   /**
-   * Run on the whole note, paragraph-by-paragraph. The shim was validated
+   * Run on the whole note, paragraph-by-paragraph. The server was validated
    * on paragraph-sized passages (~350-800 chars in the eval set); sending
    * a multi-page note as one passage would drift out of distribution.
-   * Sequences requests one at a time (the shim is single-GPU; parallelism
+   * Sequences requests one at a time (the server is single-GPU; parallelism
    * would not help). Suggestions accumulate in the panel as each
    * paragraph completes; the user can start accepting before all are
    * done.
@@ -561,7 +561,7 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
   }
 
   /**
-   * Launch the local serve shim as a child of Obsidian. Refuses to start a
+   * Launch the copyedit-ai server as a child of Obsidian. Refuses to start a
    * second instance if one is already managed, already starting, or already
    * answering on the endpoint (so we never collide on the port). The child
    * is killed on Stop and on plugin unload, so it stays up only while you
@@ -594,11 +594,11 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
 
     // Under the Flatpak build of Obsidian, spawn() runs inside the sandbox:
     // the runtime's python3 shadows the host interpreter, so the venv's
-    // site-packages are invisible and the shim dies on import. flatpak-spawn
+    // site-packages are invisible and the server dies on import. flatpak-spawn
     // --host escapes to the real system; it requires the org.freedesktop.Flatpak
     // talk permission (flatpak override --user --talk-name=org.freedesktop.Flatpak
     // md.obsidian.Obsidian). --watch-bus kills the host process if Obsidian
-    // dies without running onunload, so the shim still can't leak.
+    // dies without running onunload, so the server still can't leak.
     const inFlatpak = !!process.env.FLATPAK_ID;
     let child;
     try {
@@ -1014,7 +1014,7 @@ class ReviewSettingTab extends obsidian.PluginSettingTab {
     containerEl.createEl('h2', { text: 'Copyedit AI - Review Edition' });
     new obsidian.Setting(containerEl)
       .setName('Server endpoint')
-      .setDesc('URL of the local copyedit-ai shim (POST /edit).')
+      .setDesc('URL of the local copyedit-ai server (POST /edit).')
       .addText((t) => t
         .setPlaceholder(DEFAULT_ENDPOINT)
         .setValue(this.plugin.settings.endpoint)
@@ -1037,7 +1037,7 @@ class ReviewSettingTab extends obsidian.PluginSettingTab {
 
     containerEl.createEl('h3', { text: 'Local server' });
     containerEl.createEl('p', {
-      text: 'Optional: let the plugin start and stop the copyedit-ai shim '
+      text: 'Optional: let the plugin start and stop the copyedit-ai server '
           + 'for you (Start/Stop button in the review pane, or the "Start / '
           + 'Stop local server" commands). The server runs only while the '
           + 'plugin manages it - stopping the plugin or quitting Obsidian '
@@ -1088,7 +1088,7 @@ class ReviewSettingTab extends obsidian.PluginSettingTab {
     containerEl.createEl('h3', { text: 'Categories to show' });
     containerEl.createEl('p', {
       text: 'Suggestions tagged with an unchecked category are hidden '
-          + 'from the panel. The shim still generates them; only the '
+          + 'from the panel. The server still generates them; only the '
           + 'display is filtered.',
       cls: 'setting-item-description',
     });
@@ -1111,7 +1111,7 @@ class ReviewSettingTab extends obsidian.PluginSettingTab {
       .setName('Keep my spelling convention')
       .setDesc('Drop suggestions that only switch between British/Canadian '
           + 'and American spelling (colour/color, realise/realize, '
-          + 'centre/center). Applied by the shim before the critic; takes '
+          + 'centre/center). Applied by the server before the critic; takes '
           + 'effect on the next request. Dash-style swaps (hyphen or -- for '
           + 'an em dash, dash for a comma) are always dropped.')
       .addToggle((tg) => tg
@@ -1125,7 +1125,7 @@ class ReviewSettingTab extends obsidian.PluginSettingTab {
     containerEl.createEl('p', {
       text: 'Free-form DROP rules that get appended to the critic prompt '
           + 'on every request. One rule per line is typical. Takes effect '
-          + 'immediately; no shim restart needed. Use the "Synthesize '
+          + 'immediately; no server restart needed. Use the "Synthesize '
           + 'rules from feedback log" command to draft these from your '
           + 'Accept / Reject history.',
       cls: 'setting-item-description',

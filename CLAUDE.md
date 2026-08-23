@@ -3,25 +3,26 @@
 This is a **standalone Obsidian plugin repo** extracted from the
 parent copyedit-ai project on 2026-05-16. The plugin lives here so it
 can be tracked, published to Obsidian's community plugin gallery, and
-versioned independently of the model-training repo at
-`../copyedit-ai/`.
+versioned independently of the copyedit-ai repo at `../copyedit-ai/`,
+which holds the server (Gemma-4-E4B + critic + rule filters) this plugin
+talks to.
 
 ## Contract summary
 
 - Plugin id: `copyedit-ai-review`
 - User-facing name: "Copyedit AI - Review Edition (WIP)"
-- Talks to the local shim at `http://127.0.0.1:8765/edit` (configurable
-  in settings). The shim is at `../copyedit-ai/src/copyedit/serve/server.py`
+- Talks to the local server at `http://127.0.0.1:8765/edit` (configurable
+  in settings). The server is at `../copyedit-ai/src/copyedit/serve/server.py`
   in the parent repo and is the source of truth for the editor/critic
   prompts.
 - Request: `POST /edit {"passage": str, "user_rules": str, "keep_spelling": bool}`
-  (`keep_spelling` default true: the shim drops British/Canadian <-> American
+  (`keep_spelling` default true: the server drops British/Canadian <-> American
   spelling-variant suggestions; dash-style swaps are always dropped - both
   deterministic rules from `copyedit.change_types`, added 2026-08-17/18).
 - Response: `{"suggestions": [{"original_text", "proposed_replacement",
   "category", "rationale"}], "timings": {...}}`.
 
-The shim is NOT part of this repo. Users running the plugin against
+The server is NOT part of this repo. Users running the plugin against
 their own backend can swap the endpoint in the settings tab.
 
 ## How it works
@@ -29,7 +30,7 @@ their own backend can swap the endpoint in the settings tab.
 1. User runs "Suggest edits on selection" / "...on current paragraph" /
    "...on whole note" from the command palette or the editor right-click
    menu.
-2. The text is POSTed to the shim. For whole-note, the plugin splits on
+2. The text is POSTed to the server. For whole-note, the plugin splits on
    blank lines and sequences paragraph-sized requests; suggestions
    accumulate in the panel as each finishes.
 3. Returned suggestions are pushed into `this.suggestions` (in-memory
@@ -108,9 +109,9 @@ The user-facing display name in `manifest.json` is "Copyedit AI -
 Review Edition (WIP)". When the user picks a final name, update
 manifest.json `name` and the command-palette prefixes in main.js.
 
-## Companion shim
+## Companion server
 
-The shim must be running for the plugin to do anything useful. The
+The server must be running for the plugin to do anything useful. The
 plugin can start and stop it for you:
 
 - Start server / Stop server button in the review pane header, or the
@@ -120,7 +121,7 @@ plugin can start and stop it for you:
   `child_process`, polls `/health`, and reports when ready. It refuses
   to double-bind if a server is already answering on the endpoint.
 - Lifecycle is tied to the plugin: Stop, disabling the plugin, or
-  quitting Obsidian sends SIGTERM (`onunload`), so the shim is never
+  quitting Obsidian sends SIGTERM (`onunload`), so the server is never
   left running in the background. A crash that skips `onunload` can
   leak it; the next Start detects the live port and declines to start
   a second.
@@ -130,7 +131,7 @@ plugin can start and stop it for you:
 - Flatpak Obsidian (the maintainer's install): a plain spawn() runs
   inside the sandbox, where the runtime's python3 (3.12) shadows the
   host interpreter and the venv's 3.10 site-packages are invisible -
-  the shim dies on import with exit 1 ("server stopped unexpectedly").
+  the server dies on import with exit 1 ("server stopped unexpectedly").
   When `FLATPAK_ID` is set, the plugin instead spawns
   `flatpak-spawn --host --watch-bus /bin/sh -c 'cd "$0" && exec "$1" -u -m "$2"' cwd py mod`.
   Requires the org.freedesktop.Flatpak talk permission:

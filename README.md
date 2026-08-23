@@ -35,7 +35,7 @@ Edition (WIP)" on. Disable Restricted Mode first if it's on.
 The plugin needs the local server running. You can start it without
 leaving Obsidian: open the review pane and click "Start server" (or run
 the "Start local server" command). It launches the companion
-`copyedit-ai` shim, waits for it to load the model (~10 s), and tells
+`copyedit-ai` server, waits for it to load the model (~10 s), and tells
 you when it's ready. "Stop server" shuts it down, and so does disabling
 the plugin or quitting Obsidian, so it only runs while you're editing.
 
@@ -100,8 +100,12 @@ Request:
 POST /edit
 Content-Type: application/json
 
-{ "passage": "..." }
+{ "passage": "...", "user_rules": "", "keep_spelling": true }
 ```
+
+`user_rules` (free text, may be empty) is appended to the server's critic
+prompt as extra DROP rules; `keep_spelling` (default true) asks the server
+to drop British/Canadian <-> American spelling-variant suggestions.
 
 Response:
 
