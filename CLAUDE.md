@@ -30,9 +30,15 @@ their own backend can swap the endpoint in the settings tab.
 1. User runs "Suggest edits on selection" / "...on current paragraph" /
    "...on whole note" from the command palette or the editor right-click
    menu.
-2. The text is POSTed to the server. For whole-note, the plugin splits on
-   blank lines and sequences paragraph-sized requests; suggestions
-   accumulate in the panel as each finishes.
+2. The text is POSTed to the server. For whole-note, and for a selection
+   that spans blank lines, the plugin splits on blank lines and sequences
+   paragraph-sized requests (`runParagraphs`); suggestions accumulate in
+   the panel as each finishes. Paragraphs under 40 chars are skipped.
+   Never send a multi-paragraph passage as one request: the server's
+   editor pass stops at 1024 new tokens and the suggestion table runs
+   about 3x the passage, so past roughly 1,300 chars the table is cut off
+   and the back of the passage gets nothing (measured 2026-10-10,
+   `../copyedit-ai/experiments.md` "Selection length probe").
 3. Returned suggestions are pushed into `this.suggestions` (in-memory
    array on the plugin instance), each tagged with the source file
    path.

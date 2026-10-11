@@ -79,6 +79,18 @@ function looksLikeServerDown(err) {
 
 // --- helpers -----------------------------------------------------------------
 
+// Paragraph-by-paragraph runs skip anything shorter than this (headings,
+// scene breaks, stray fragments).
+const MIN_PARAGRAPH_CHARS = 40;
+
+// Split on blank lines; paragraphs come back trimmed, empties dropped.
+function splitParagraphs(text) {
+  return text
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+}
+
 let suggestionCounter = 0;
 function nextSuggestionId() {
   suggestionCounter += 1;
@@ -387,6 +399,14 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
 
   // --- generation -----------------------------------------------------------
 
+  /**
+   * Run on the selection. A selection that spans blank lines goes through
+   * paragraph by paragraph, like the whole-note run. Sent as one passage, a
+   * long selection hits the server's cap on editor output: the suggestion
+   * table stops partway and the back of the selection gets nothing
+   * (copyedit-ai experiments.md, "Selection length probe", 2026-10-10).
+   * A selection inside one paragraph is sent exactly as selected.
+   */
   async runOnSelection(editor) {
     const sel = editor.getSelection();
     if (!sel || !sel.trim()) {
@@ -394,7 +414,16 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       return;
     }
     const file = this.app.workspace.getActiveFile();
-    await this.fetchAndStash(sel, file ? file.path : '');
+    const sourceFile = file ? file.path : '';
+    const all = splitParagraphs(sel);
+    const paragraphs = all.filter((p) => p.length >= MIN_PARAGRAPH_CHARS);
+    // One paragraph, or nothing long enough to stand alone (a few short
+    // lines): there is nothing to split, so send it as selected.
+    if (all.length <= 1 || paragraphs.length === 0) {
+      await this.fetchAndStash(sel, sourceFile);
+      return;
+    }
+    await this.runParagraphs(paragraphs, sourceFile, 'selection', all.length - paragraphs.length);
   }
 
   async runOnCurrentParagraph(editor) {
@@ -414,13 +443,7 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
   }
 
   /**
-   * Run on the whole note, paragraph-by-paragraph. The server was validated
-   * on paragraph-sized passages (~350-800 chars in the eval set); sending
-   * a multi-page note as one passage would drift out of distribution.
-   * Sequences requests one at a time (the server is single-GPU; parallelism
-   * would not help). Suggestions accumulate in the panel as each
-   * paragraph completes; the user can start accepting before all are
-   * done.
+   * Run on the whole note, paragraph-by-paragraph.
    */
   async runOnWholeNote(editor) {
     const text = editor.getValue();
@@ -428,22 +451,37 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       new obsidian.Notice('Copyedit AI: empty note.');
       return;
     }
-    const paragraphs = text
-      .split(/\n\s*\n/)
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0 && p.length >= 40); // skip very short bits
+    const paragraphs = splitParagraphs(text)
+      .filter((p) => p.length >= MIN_PARAGRAPH_CHARS);
     if (paragraphs.length === 0) {
       new obsidian.Notice('Copyedit AI: no paragraphs to process.');
       return;
     }
     const file = this.app.workspace.getActiveFile();
-    const sourceFile = file ? file.path : '';
+    await this.runParagraphs(paragraphs, file ? file.path : '', 'whole-note', 0);
+  }
+
+  /**
+   * Send paragraphs one request at a time. The server was validated on
+   * paragraph-sized passages (~350-800 chars in the eval set); sending
+   * a multi-page passage as one request would drift out of distribution.
+   * Sequences requests one at a time (the server is single-GPU; parallelism
+   * would not help). Suggestions accumulate in the panel as each
+   * paragraph completes; the user can start accepting before all are
+   * done. `label` names the run in notices; `skipped` is how many short
+   * paragraphs the caller left out.
+   */
+  async runParagraphs(paragraphs, sourceFile, label, skipped) {
     const N = paragraphs.length;
     let totalSuggestions = 0;
     let failures = 0;
+    let serverDown = null;
+    let stoppedAt = 0;
     const t0 = Date.now();
+    const skippedNote = skipped > 0
+      ? `; ${skipped} short one${skipped === 1 ? '' : 's'} skipped` : '';
     new obsidian.Notice(
-      `Copyedit AI: processing ${N} paragraph${N === 1 ? '' : 's'} (~${Math.ceil(N * 25 / 60)} min)...`
+      `Copyedit AI: processing ${N} paragraph${N === 1 ? '' : 's'} (~${Math.ceil(N * 25 / 60)} min${skippedNote})...`
     );
     await this.activatePane();
     for (let i = 0; i < N; i++) {
@@ -452,8 +490,14 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       try {
         payload = await this.callServer(paragraphs[i]);
       } catch (err) {
+        console.error(`copyedit-ai ${label} paragraph ${i + 1} failed`, err);
+        if (looksLikeServerDown(err)) {
+          // Nothing is listening, so every remaining paragraph would fail too.
+          serverDown = err;
+          stoppedAt = i + 1;
+          break;
+        }
         failures += 1;
-        console.error(`copyedit-ai whole-note paragraph ${i + 1} failed`, err);
         continue;
       }
       const incoming = (payload && payload.suggestions) || [];
@@ -471,11 +515,24 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       this.refreshPane();
     }
     this.statusBar.setText('');
+    if (serverDown) {
+      new obsidian.Notice(
+        'Copyedit AI error: ' + serverDown.message + (this.serverDownHint(serverDown) || '.')
+        + ` Stopped at paragraph ${stoppedAt}/${N}.`
+      );
+      return;
+    }
     const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
     const tail = failures > 0 ? ` (${failures} paragraph${failures === 1 ? '' : 's'} failed)` : '';
     new obsidian.Notice(
-      `Copyedit AI: whole-note done. ${totalSuggestions} suggestion${totalSuggestions === 1 ? '' : 's'} from ${N} paragraph${N === 1 ? '' : 's'} (${elapsed}s).${tail}`
+      `Copyedit AI: ${label} done. ${totalSuggestions} suggestion${totalSuggestions === 1 ? '' : 's'} from ${N} paragraph${N === 1 ? '' : 's'} (${elapsed}s).${tail}`
     );
+  }
+
+  serverDownHint(err) {
+    return (!this.serverProcess && looksLikeServerDown(err))
+      ? ' - is the local server running? Open the review pane and click "Start server".'
+      : '';
   }
 
   async fetchAndStash(text, sourceFile) {
@@ -486,10 +543,7 @@ class CopyeditAIReviewPlugin extends obsidian.Plugin {
       payload = await this.callServer(text);
     } catch (err) {
       this.statusBar.setText('');
-      const hint = (!this.serverProcess && looksLikeServerDown(err))
-        ? ' - is the local server running? Open the review pane and click "Start server".'
-        : '';
-      new obsidian.Notice('Copyedit AI error: ' + err.message + hint);
+      new obsidian.Notice('Copyedit AI error: ' + err.message + this.serverDownHint(err));
       console.error('copyedit-ai server call failed', err);
       return;
     }

@@ -63,7 +63,10 @@ Open the side panel from the pencil ribbon icon on the left, or run
 Three ways to ask for suggestions, all available from both the command
 palette and the editor right-click menu:
 
-- "Suggest on selection" - highlight a paragraph or two and run it.
+- "Suggest on selection" - highlight any amount of text and run it. A
+  selection that spans several paragraphs is sent one paragraph at a
+  time, the same way as the whole note. A selection inside a single
+  paragraph is sent exactly as selected.
 - "Suggest on current paragraph" - put your cursor anywhere in a
   paragraph; the plugin walks out to the nearest blank line on each
   side.
